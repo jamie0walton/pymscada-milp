@@ -204,7 +204,6 @@ class LpModel():
 
     def remove_result(self):
         """Clean the working directory of result files."""
-        return
         for f in [
             self.path.parent / f"{self.path.name}.rows_cols",
             self.path.parent / f"{self.path.name}.debug",
