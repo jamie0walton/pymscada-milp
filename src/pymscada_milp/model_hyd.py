@@ -760,7 +760,7 @@ class Generator(Constraint):
         self.name = None
         self.cost = 1.0
         self.state = State.FREE
-        self.MW = 0.0
+        self.MW: TimeSeries = None
         self.setMW = 0.0
         self.stop = False
         self.startlimit = []
@@ -776,16 +776,17 @@ class Generator(Constraint):
 
     def _create_lp(self, m: HydraulicModel):
         for t in m.times:
+            power = 0.0
+            if self.MW is not None:
+                power = self.MW.get(t)
             self._add_ranges(m, t)
+            power = self._range_conform(power)
             if t < m.set_time:
-                if self.history is None:
-                    raise(f'Power {self.name} requires history.')
-                power = self._range_conform(self.history(t))
                 m.lp.add_row(self._power_name(t), 'E', power)
             elif self.state == State.OFF:
                 m.lp.add_row(self._power_name(t), 'E', 0)
             elif self.state == State.FIXED:
-                m.lp.add_row(self._power_name(t), 'E', self.MW)
+                m.lp.add_row(self._power_name(t), 'E', power)
             # Always calculate flow from power
             m.lp.add_sos2(self._power_name(t), [x[0] for x in self.PQ],
                           self._flow_name(t), [x[1] for x in self.PQ])
@@ -794,7 +795,7 @@ class Generator(Constraint):
             pre_times = [m.start_time - i * m.time_step for i in
                          range(self.startlimit[1] // m.time_step - 1, 0, -1)]
             for t in pre_times:
-                power = self._range_conform(self.history(t))
+                power = self._range_conform(self.MW.get(t))
                 m.lp.add_row(self._power_name(t), 'E', power)
                 self._add_ranges(m, t)
             cos_lists = [[]]
@@ -971,7 +972,7 @@ class Match(Constraint):
         pass
 
     def _create_lp(self, m: HydraulicModel):
-        if self.state1 != FREE or self.state2 != FREE:
+        if self.state1 != State.FREE or self.state2 != State.FREE:
             return
         for t in m.times:
             if t < m.set_time:
