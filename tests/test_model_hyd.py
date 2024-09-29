@@ -6,8 +6,8 @@ from pymscada_milp.model_hyd import Constraint
 
 
 def test_ts_basic():
-    ts1 = TimeSeries('tag1')
-    ts2 = TimeSeries('tag2')
+    ts1 = TimeSeries()
+    ts2 = TimeSeries()
     ts1.value = 123
     ts2.value = -1
     ts2.set([[200, 1000], [50, 1],[100, 10]])
@@ -18,9 +18,7 @@ def test_ts_basic():
     assert ts2.get(500) == 1000
 
 
-# make sure the tag history is not expired with ...
-VERY_OLD = 9000000000
-# assert tests assume PQ and LV never change
+# Power MW, Flow cumecs
 PQ = [
     [0.0, 0.0],
     [0.01, 8.0],
@@ -28,6 +26,7 @@ PQ = [
     [10.0, 30.2],
     [12.8, 47.7]
 ]
+# Level mm, volume m3
 LV = [
     [145.00, 0],
     [145.10, 117740],
@@ -52,7 +51,6 @@ LV = [
     [147.00, 3038440],
     [148.00, 3278990]
 ]
-tagcount = count()
 
 
 def get_samples(m, element, parameter, times):
@@ -92,33 +90,34 @@ def test_range_conform():
 
 def test_model_times():
     """Make sure that the time sequences are as expected."""
-    inflow = TimeSeries('Inflow', [
+    inflow = TimeSeries([
         [12342665, 9.0],
         [12343665, 8.0],
         [12344665, 7.0],
         [12345665, 6.0]
     ])
     model = {
-        'tempdir': 'tmp',
         'name': 'test',
+        'actual_time': 123456651,
+        'time_step': 600,
+        'duration': 1200,
+        'tempdir': 'tmp',
         'model': {
             'Valve': {
                 'type': 'valve',
-                'flow': inflow,
+                'time_series': inflow,
                 'state': State.OFF
             },
             'River': {
                 'type': 'river',
+                'time_series': inflow,
                 'srcnode': 'Valve',
-                'delay': 600,
-                'history': inflow
+                'delay': 600
             }
-        },
-        'time_step': 600,
-        'duration': 1200
+        }
     }
     m = HydraulicModel(model)
-    m.solve_lp(123456651)
+    m.solve_lp()
     # No time clash
     assert m.start_time == 123456600
     assert m.actual_time == 123456651
@@ -129,7 +128,8 @@ def test_model_times():
                        123456652,  # set_time
                        123457200,  # interval step - normally more
                        123457800]  # end_time
-    m.solve_lp(123456600)
+    m.set_actual_time(123456600)
+    m.solve_lp()
     # TODO check that the 1 second move is necessary
     # remove if not.
     # slip evaluation time back 1 second
@@ -142,7 +142,8 @@ def test_model_times():
                        123456602,  # set_time
                        123457200,  # interval step - normally more
                        123457800]  # end_time
-    m.solve_lp(123457199)
+    m.set_actual_time(123457199)
+    m.solve_lp()
     # push evaluation time forward 1 second
     assert m.start_time == 123456600
     assert m.actual_time == 123457198
@@ -158,21 +159,25 @@ def test_model_times():
 
 def test_tank_fixed():
     """Simple fill / empty tank with fixed flows to check the math."""
-    inflow = TimeSeries('Inflow', [[0, 9.0]])
-    outflow = TimeSeries('Outflow', [[0, 1.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    inflow = TimeSeries(9.0)
+    outflow = TimeSeries(1.0)
+    tank = TimeSeries(0.5)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 1200,
+        'tempdir': 'tmp',
         'model': {
             'Inflow': {
                 'type': 'valve',
+                'time_series': inflow,
                 'dstnode': 'Tank',
-                'flow': inflow,
                 'state': State.FIXED
             },
             'Tank': {
                 'type': 'storage',
-                'level': 0.5,
+                'time_series': tank,
                 'LV': [
                     [0.00, 0],
                     [1.00, 1000000]
@@ -192,46 +197,43 @@ def test_tank_fixed():
             },
             'Outflow': {
                 'type': 'valve',
+                'time_series': outflow,
                 'srcnode': 'Tank',
-                'flow': outflow,
                 'state': State.FIXED
             }
-        },
-        'time_step': 600,
-        'duration': 1200
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
-    results = m.lp.resultsdict
-    times = sorted(results['Inflow']['Flow'].keys())
-    inflow = get_samples(m, 'Inflow', 'Flow', times)
-    tank = get_samples(m, 'Tank', 'Volume', times)
-    outflow = get_samples(m, 'Outflow', 'Flow', times)
-    assert inflow == [9, 9, 9, 9, 9]
-    assert tank == [None, 500000, 500008, 502400, 507200]
-    assert outflow == [1, 1, 1, 1, 1]
+    m = HydraulicModel(model)
+    m.solve_lp()
+    assert inflow.times() == [0, 1522494000, 1522494300, 1522494301,
+                              1522494600, 1522495200]
+    assert inflow.values() == [9, 9, 9, 9, 9, 9]
+    assert tank.values() == [0.5, 0.5, 0.500008, 0.5024, 0.5072]
+    assert outflow.values() == [1, 1, 1, 1, 1, 1]
     m.remove_result()
 
 
 def test_tank_fixed_river():
     """Simple fill / empty tank with fixed flows and river delay."""
-    inflow = TimeSeries('Inflow', [
+    inflow = TimeSeries([
         [1522492200, 9.0],
         [1522492800, 8.0],
         [1522493400, 7.0],
         [1522494300, 6.0]
     ])
-    outflow = TimeSeries('Outflow', [
-        [1522494300, 1.0]
-    ])
-    modeldict = {
-        'tempdir': 'tmp',
+    outflow = TimeSeries(1.0)
+    tank = TimeSeries(0.5)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 2400,
+        'tempdir': 'tmp',
         'model': {
             'Inflow': {
                 'type': 'valve',
+                'time_series': inflow,
                 'dstnode': 'Upstream',
-                'flow': inflow,
                 'state': State.FIXED
             },
             'Upstream': {
@@ -239,14 +241,14 @@ def test_tank_fixed_river():
             },
             'River': {
                 'type': 'river',
+                'time_series': inflow,
                 'srcnode': 'Upstream',
                 'dstnode': 'Tank',
-                'delay': 1200,
-                'history': inflow
+                'delay': 1200
             },
             'Tank': {
                 'type': 'storage',
-                'level': 0.5,
+                'time_series': tank,
                 'LV': [
                     [0.00, 0],
                     [1.00, 1000000]
@@ -263,24 +265,14 @@ def test_tank_fixed_river():
             },
             'Outflow': {
                 'type': 'valve',
+                'time_series': outflow,
                 'srcnode': 'Tank',
-                'flow': outflow,
                 'state': State.FIXED
             }
-        },
-        'time_step': 600,
-        'duration': 2400
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
-    results = m.lp.resultsdict
-    times = sorted(results['River']['Flow_in'].keys())
-    inflow = get_samples(m, 'Inflow', 'Flow', times)
-    riverin = get_samples(m, 'River', 'Flow_in', times)
-    riverout = get_samples(m, 'River', 'Flow_out', times)
-    tank = get_samples(m, 'Tank', 'Volume', times)
-    tankwl = get_samples(m, 'Tank', 'Level', times)
-    outflow = get_samples(m, 'Outflow', 'Flow', times)
+    m = HydraulicModel(model)
+    m.solve_lp()
 # phase  time        inflow delayed outflow volume
 #        1522492200  9
 #        1522492800  8
@@ -292,35 +284,38 @@ def test_tank_fixed_river():
 #        1522495200  6      7       1       505700
 #        1522495800  6      6       1       509300
 # end    1522496400  6      6       1       512300
-    assert times == [1522494000, 1522494300, 1522494301, 1522494600,
-                     1522495200, 1522495800, 1522496400]
-    assert inflow == [7, 6, 6, 6, 6, 6, 6]
-    assert riverin == [7, 6, 6, 6, 6, 6, 6]
-    assert riverout == [None, 8, 8, 7, 7, 6, 6]
-    assert outflow == [1, 1, 1, 1, 1, 1, 1]
-    assert tank == [None, 500000, 500007, 502100, 505700, 509300, 512300]
-    assert tankwl == [None, 0.5, 0.500007, 0.5021, 0.5057, 0.5093, 0.5123]
+    assert inflow.times() == [1522492200, 1522492800, 1522493400, 1522494000,
+                              1522494300, 1522494301, 1522494600, 1522495200,
+                              1522495800, 1522496400]
+    assert inflow.values() == [9, 8, 7, 7, 6, 6, 6, 6, 6, 6]
+    assert tank.values() == [0.5, 0.5, 0.500007, 0.5021, 0.5057, 0.5093,
+                             0.5123]
+    assert outflow.values() == [1, 1, 1, 1, 1, 1, 1, 1]
     assert m.lp.solutioncost == 29507
     m.remove_result()
 
 
 def test_tank_variable_empty():
     """Tank outflow (slack) should have an optimum solution."""
-    inflow = TimeSeries('Inflow', [[1522494000, 500.0]])
-    outflow = TimeSeries('Outflow', [[1522494000, 1.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    inflow = TimeSeries([[1522494000, 500.0]])
+    outflow = TimeSeries([[1522494000, 1.0]])
+    tank = TimeSeries(0.5)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 3600,
+        'tempdir': 'tmp',
         'model': {
             'Inflow': {
                 'type': 'valve',
+                'time_series': inflow,
                 'dstnode': 'Tank',
-                'flow': inflow,
                 'state': State.FIXED
             },
             'Tank': {
                 'type': 'storage',
-                'level': 0.5,
+                'time_series': tank,
                 'min': 0.4,
                 'max': 0.6,
                 'LV': [
@@ -330,53 +325,57 @@ def test_tank_variable_empty():
             },
             'Outflow': {
                 'type': 'valve',
+                'time_series': outflow,
                 'state': State.FREE,
                 'srcnode': 'Tank',
                 'ranges': [
                     [0.0, 1000.0]
                 ],
                 'setpoint': 0,
-                'highcost': 100,  # will delay outflow
-                'flow': outflow
+                'highcost': 100  # will delay outflow
             },
             'OutflowChange': {
                 'type': 'change_cost',
                 'cost': 1.0,
                 'element': 'Outflow'
             }
-        },
-        'time_step': 600,
-        'duration': 3600
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
-    results = m.lp.resultsdict
-    times = list(results['Tank']['Level'].keys())[:4]
-    levels = [results['Tank']['Level'][t] for t in times]
-    outflows = [results['Outflow']['Flow'][t] for t in times]
-    assert levels == pytest.approx([0.5, 0.500499, 0.6, 0.6])
-    assert outflows == pytest.approx([1, 167.22074, 500, 500])
+    m = HydraulicModel(model)
+    m.solve_lp()
+    assert inflow.times() == [1522494000, 1522494300, 1522494301, 1522494600,
+                              1522495200, 1522495800, 1522496400, 1522497000,
+                              1522497600]
+    assert tank.values() == pytest.approx([0.5, 0.5, 0.500499, 0.6, 0.6, 0.6,
+                                           0.6, 0.6, 0.6])
+    assert outflow.values() == pytest.approx([1, 1, 167.22074, 500, 500, 500,
+                                              500, 500, 0])
+    assert m.lp.solutioncost == pytest.approx(267721.07358)
     m.remove_result()
 
 
-def test_tankvariableemptyprofilelimits():
+def test_tank_variable_empty_profile_limits():
     """Tank outflow (slack) should solve within flow limits."""
     # Missed adding cost, gave a slightly different answer.
-    inflow = TimeSeries('Inflow', [[1522494000, 100.0]])
-    outflow = TimeSeries('Outflow', [[1522494000, 1.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    inflow = TimeSeries([[1522494000, 100.0]])
+    outflow = TimeSeries([[1522494000, 1.0]])
+    tank = TimeSeries(0.5)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 4 * 3600,
+        'tempdir': 'tmp',
         'model': {
             'Inflow': {
                 'type': 'valve',
+                'time_series': inflow,
                 'dstnode': 'Tank',
-                'flow': inflow,
                 'state': State.FIXED,
             },
             'Tank': {
                 'type': 'storage',
-                'level': 0.5,
+                'time_series': tank,
                 'costs': [
                     [0, 0.4, 0.6, 1],
                     [[0.4, 0.1], [0, 0], [0.1, 0.4]]
@@ -388,12 +387,12 @@ def test_tankvariableemptyprofilelimits():
             },
             'Outflow': {
                 'type': 'valve',
+                'time_series': outflow,
                 'state': State.FREE,
                 'srcnode': 'Tank',
                 'ranges': [
                     [0.0, 1000.0]
-                ],
-                'flow': outflow
+                ]
             },
             'OutflowChange': {
                 'type': 'change_cost',
@@ -438,12 +437,10 @@ def test_tankvariableemptyprofilelimits():
                     [3.5 * 3600, 250.0]
                 ]
             }
-        },
-        'time_step': 600,
-        'duration': 4 * 3600
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = list(results['Tank']['Level'].keys())[:8]
     levels = [results['Tank']['Level'][t] for t in times]
@@ -458,15 +455,18 @@ def test_tankvariableemptyprofilelimits():
 
 def test_genprofile():
     """MW output to follow a profile."""
-    power = TimeSeries('Power', [[1522494000, 5.2], [1522494300, 5.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    power = TimeSeries([[1522494000, 5.2], [1522494300, 5.0]])
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 1200,
+        'tempdir': 'tmp',
         'model': {
             'G1': {
                 'type': 'generator',
+                'time_series': power,
                 'state': State.FREE,
-                'MW': power,
                 'ranges': [
                     [6.8, 12.8]
                 ],
@@ -485,12 +485,10 @@ def test_genprofile():
                     [1200, 6.0]
                 ]
             }
-        },
-        'time_step': 600,
-        'duration': 1200
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = list(results['G1']['Power'].keys())[:5]
     g1_power = [results['G1']['Power'][t] for t in times]
@@ -503,15 +501,18 @@ def test_genprofile():
 
 def test_gentimeprofile():
     """MW output to follow a profile."""
-    power = TimeSeries('Power', [[1522494000, 5.2], [1522494300, 5.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    power = TimeSeries([[1522494000, 5.2], [1522494300, 5.0]])
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 2400,
+        'tempdir': 'tmp',
         'model': {
             'G1': {
                 'type': 'generator',
+                'time_series': power,
                 'state': State.FREE,
-                'MW': power,
                 'ranges': [
                     [6.8, 12.8]
                 ],
@@ -532,12 +533,10 @@ def test_gentimeprofile():
                 'lowcost': 1,
                 'highcost': 1
             }
-        },
-        'time_step': 600,
-        'duration': 2400
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = list(results['G1']['Power'].keys())[:7]
     g1_power = [results['G1']['Power'][t] for t in times]
@@ -550,15 +549,18 @@ def test_gentimeprofile():
 
 def test_gentimestep():
     """MW output to follow a profile."""
-    power = TimeSeries('Power', [[1522494000, 5.2], [1522494300, 5.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    power = TimeSeries([[1522494000, 5.2], [1522494300, 5.0]])
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 2400,
+        'tempdir': 'tmp',
         'model': {
             'G1': {
                 'type': 'generator',
+                'time_series': power,
                 'state': State.FREE,
-                'MW': power,
                 'ranges': [
                     [6.8, 12.8]
                 ],
@@ -580,12 +582,10 @@ def test_gentimestep():
                 'lowcost': 1,
                 'highcost': 1
             }
-        },
-        'time_step': 600,
-        'duration': 2400
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = list(results['G1']['Power'].keys())[:7]
     g1_power = [results['G1']['Power'][t] for t in times]
@@ -599,16 +599,19 @@ def test_gentimestep():
 
 def test_twogensemi():
     """MW output semi-continuous."""
-    power1 = TimeSeries('Power', [[1522494000, 5.2], [1522494300, 5.0]])
-    power2 = TimeSeries('Power', [[1522494000, 5.2], [1522494300, 5.1]])
-    modeldict = {
-        'tempdir': 'tmp',
+    power1 = TimeSeries([[1522494000, 5.2], [1522494300, 5.0]])
+    power2 = TimeSeries([[1522494000, 5.2], [1522494300, 5.1]])
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 1200,
+        'tempdir': 'tmp',
         'model': {
             'G1': {
                 'type': 'generator',
+                'time_series': power1,
                 'state': State.FREE,
-                'MW': power1,
                 'ranges': [
                     [0.0],
                     [6.8, 12.8]
@@ -617,8 +620,8 @@ def test_twogensemi():
             },
             'G2': {
                 'type': 'generator',
+                'time_series': power2,
                 'state': State.FREE,
-                'MW': power2,
                 'ranges': [
                     [0.0],
                     [6.8, 12.8]
@@ -639,12 +642,10 @@ def test_twogensemi():
                     [1200, 22.0]
                 ]
             }
-        },
-        'time_step': 600,
-        'duration': 1200
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = list(results['G1']['Power'].keys())[:5]
     g1_power = [results['G1']['Power'][t] for t in times]
@@ -661,16 +662,19 @@ def test_twogensemi():
 
 def test_twogensemi2():
     """MW output semi-continuous, 2 generators."""
-    power1 = TimeSeries('Power', [[1522494000, 5.2], [1522494300, 5.0]])
-    power2 = TimeSeries('Power', [[1522494000, 5.2], [1522494300, 5.1]])
-    modeldict = {
-        'tempdir': 'tmp',
+    power1 = TimeSeries([[1522494000, 5.2], [1522494300, 5.0]])
+    power2 = TimeSeries([[1522494000, 5.2], [1522494300, 5.1]])
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 600,
+        'tempdir': 'tmp',
         'model': {
             'G1': {
                 'type': 'generator',
+                'time_series': power1,
                 'state': State.FREE,
-                'MW': power1,
                 'ranges': [
                     [0.0],  # always assumed as zero
                     [1.0, 3.0],
@@ -680,8 +684,8 @@ def test_twogensemi2():
             },
             'G2': {
                 'type': 'generator',
+                'time_series': power2,
                 'state': State.FREE,
-                'MW': power2,
                 'ranges': [
                     [0.0],  # always assumed as zero
                     [1.0, 3.0],
@@ -702,12 +706,10 @@ def test_twogensemi2():
                     [600, 26.0],
                 ]
             }
-        },
-        'time_step': 600,
-        'duration': 600
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = results['G1']['Power'].keys()
     g1_power = [results['G1']['Power'][t] for t in times]
@@ -726,19 +728,22 @@ def test_gensemi_changeofstate():
     obvious. It was wrong before, now improved but still not fully
     checked as the math to check manually is getting long.
     """
-    power1 = TimeSeries('Power')
+    power1 = TimeSeries()
     for i, v in enumerate([0.01, 0.02, 0.03, 0.04, 0.05,
                            0.06, 0.07, 0.08, 11.0]):
         power1.set([[1522489200 + i * 600, v]])
     power1.set([[1522494300, 11.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 28 * 600,
+        'tempdir': 'tmp',
         'model': {
             'G1': {
                 'type': 'generator',
+                'time_series': power1,
                 'state': State.FREE,
-                'MW': power1,
                 'startlimit': [1, 2400, 1000.0],  # 1 change in 2400 seconds
                 'ranges': [
                     [0.0],  # always assumed as zero
@@ -785,12 +790,10 @@ def test_gensemi_changeofstate():
                     [16800, 0.0],
                 ]
             }
-        },
-        'time_step': 600,
-        'duration': 28 * 600
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = results['G1']['Power'].keys()
     g1_power = [results['G1']['Power'][t] for t in times]
@@ -808,23 +811,27 @@ def test_valveriverlake():
 
     History is clearly calculated in a different way, twice now :(.
     """
-    upper = TimeSeries('Upper', [
+    upper = TimeSeries([
         [1522491600, 4.0],
         [1522492200, 5.0],
         [1522492800, 6.0],
         [1522493400, 7.0]
     ])
-    sysinflow = TimeSeries('SysInflow', [
+    sysinflow = TimeSeries([
         [1522494000, 14.0]
     ])
-    modeldict = {
-        'tempdir': 'tmp',
+    lake = TimeSeries(146.33)
+    model = {
         'name': 'test',
+        'actual_time': 1522494189,
+        'time_step': 600,
+        'duration': 6000,
+        'tempdir': 'tmp',
         'model': {
             'System_Inflow': {
                 'type': 'valve',
+                'time_series': sysinflow,
                 'dstnode': 'Galatea_Site',
-                'flow': sysinflow,
                 'state': State.FIXED
             },
             'Galatea_Site': {
@@ -832,25 +839,23 @@ def test_valveriverlake():
             },
             'Upper': {
                 'type': 'river',
+                'time_series': upper,
                 'delay': 1800,
                 'srcnode': 'Galatea_Site',
-                'dstnode': 'Lake_Aniwhenua',
-                'history': upper
+                'dstnode': 'Lake_Aniwhenua'
             },
             'Lake_Aniwhenua': {
                 'type': 'storage',
-                'level': 146.33,
+                'time_series': lake,
                 'LV': LV,
                 'setpoint': 146.7,
                 'lowcost': 0.000001,
                 'highcost': 0.000001
             }
-        },
-        'time_step': 600,
-        'duration': 6000
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494189)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = sorted(results['Upper']['Flow_in'].keys())
     upperin = get_samples(m, 'Upper', 'Flow_in', times)
@@ -872,19 +877,23 @@ def test_lake_bidoffer():
     Time adjustment as per test_valveriverlake and overall cost was
     exactly right. Consistent shift in time at least.
     """
-    upper = TimeSeries('Upper',[[1522491600, 60.0], [1522492200, 60.0],
-                                [1522492800, 60.0], [1522493400, 60.0]])
-    sysinflow = TimeSeries('SysInflow', [[1522494000, 60.0]])
-    power1 = TimeSeries('G1', [[1522492200, 6.2], [1522494000, 6.0]])
-    power2 = TimeSeries('G2', [[1522492200, 0.2], [1522494000, 0.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    upper = TimeSeries([[1522491600, 60.0], [1522492200, 60.0],
+                        [1522492800, 60.0], [1522493400, 60.0]])
+    sysinflow = TimeSeries([[1522494000, 60.0]])
+    power1 = TimeSeries([[1522492200, 6.2], [1522494000, 6.0]])
+    power2 = TimeSeries([[1522492200, 0.2], [1522494000, 0.0]])
+    lake = TimeSeries(146.6)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 14400,
+        'tempdir': 'tmp',
         'model': {
             'System_Inflow': {
                 'type': 'valve',
+                'time_series': sysinflow,
                 'dstnode': 'Galatea_Site',
-                'flow': sysinflow,
                 'state': State.FIXED
             },
             'Galatea_Site': {
@@ -892,14 +901,14 @@ def test_lake_bidoffer():
             },
             'Upper': {
                 'type': 'river',
+                'time_series': upper,
                 'delay': 1800,
                 'srcnode': 'Galatea_Site',
-                'dstnode': 'Lake_Aniwhenua',
-                'history': upper
+                'dstnode': 'Lake_Aniwhenua'
             },
             'Lake_Aniwhenua': {
                 'type': 'storage',
-                'level': 146.6,
+                'time_series': lake,
                 'LV': LV,
                 'costs': [
                     [146.5, 146.6, 146.8, 146.9],
@@ -908,9 +917,9 @@ def test_lake_bidoffer():
             },
             'G1': {
                 'type': 'generator',
+                'time_series': power1,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'MW': power1,
                 'ranges': [
                     [6.8, 12.8]
                 ],
@@ -918,9 +927,9 @@ def test_lake_bidoffer():
             },
             'G2': {
                 'type': 'generator',
+                'time_series': power2,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'MW': power2,
                 'startlimit': [1, 1200, 1000.0],
                 'ranges': [
                     [0.0],
@@ -999,12 +1008,10 @@ def test_lake_bidoffer():
                     ]
                 }
             }
-        },
-        'time_step': 600,
-        'duration': 14400
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = results['Lake_Aniwhenua']['Level'].keys()
     level = get_samples(m, 'Lake_Aniwhenua', 'Level', times)
@@ -1048,19 +1055,23 @@ def test_lake_bidoffer():
 
 def test_lake_bidoffer_maxroc():
     """Add rate of change limit."""
-    upper = TimeSeries('Upper',[[1522491600, 65.0], [1522492200, 65.0],
-                                [1522492800, 65.0], [1522493400, 65.0]])
-    sysinflow = TimeSeries('SysInflow', [[1522494000, 65.0]])
-    power1 = TimeSeries('G1', [[1522492200, 6.2], [1522494000, 6.0]])
-    power2 = TimeSeries('G2', [[1522492200, 0.2], [1522494000, 0.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    upper = TimeSeries([[1522491600, 65.0], [1522492200, 65.0],
+                        [1522492800, 65.0], [1522493400, 65.0]])
+    sysinflow = TimeSeries([[1522494000, 65.0]])
+    power1 = TimeSeries([[1522492200, 6.2], [1522494000, 6.0]])
+    power2 = TimeSeries([[1522492200, 0.2], [1522494000, 0.0]])
+    lake = TimeSeries(146.6)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 14400,
+        'tempdir': 'tmp',
         'model': {
             'System_Inflow': {
                 'type': 'valve',
+                'time_series': sysinflow,
                 'dstnode': 'Galatea_Site',
-                'flow': sysinflow,
                 'state': State.FIXED
             },
             'Galatea_Site': {
@@ -1068,14 +1079,14 @@ def test_lake_bidoffer_maxroc():
             },
             'Upper': {
                 'type': 'river',
+                'time_series': upper,
                 'delay': 1800,
                 'srcnode': 'Galatea_Site',
-                'dstnode': 'Lake_Aniwhenua',
-                'history': upper
+                'dstnode': 'Lake_Aniwhenua'
             },
             'Lake_Aniwhenua': {
                 'type': 'storage',
-                'level': 146.6,
+                'time_series': lake,
                 'LV': LV,
                 'costs': [
                     [146.5, 146.6, 146.8, 146.9],
@@ -1084,9 +1095,9 @@ def test_lake_bidoffer_maxroc():
             },
             'G1': {
                 'type': 'generator',
+                'time_series': power1,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'MW': power1,
                 'ranges': [
                     [6.8, 12.8]
                 ],
@@ -1094,9 +1105,9 @@ def test_lake_bidoffer_maxroc():
             },
             'G2': {
                 'type': 'generator',
+                'time_series': power2,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'MW': power2,
                 'startlimit': [1, 1200, 1000.0],
                 'ranges': [
                     [0.0],
@@ -1185,12 +1196,10 @@ def test_lake_bidoffer_maxroc():
                     'G2'
                 ],
             }
-        },
-        'time_step': 600,
-        'duration': 14400
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = sorted(results['Lake_Aniwhenua']['Level'].keys())
     level = get_samples(m, 'Lake_Aniwhenua', 'Level', times)
@@ -1225,23 +1234,27 @@ def test_lake_bidoffer_maxroc():
 
 def test_lake_minflow():
     """Add rate of change limit."""
-    rainflow = TimeSeries('Rain', [[1522400000, 25.0]])
-    lower = TimeSeries('Lower', [[1522400000, 2.5]])
-    barrage = TimeSeries('Barrage', [[1522400000, 2.5]])
-    sysoutflow = TimeSeries('SysOutflow', [[1522400000, 7.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    rainflow = TimeSeries([[1522400000, 25.0]])
+    lower = TimeSeries([[1522400000, 2.5]])
+    barrage = TimeSeries([[1522400000, 2.5]])
+    sysoutflow = TimeSeries([[1522400000, 7.0]])
+    lake = TimeSeries(146.6)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 600,
+        'duration': 14400,
+        'tempdir': 'tmp',
         'model': {
             'Rainflow': {
                 'type': 'valve',
-                'flow': rainflow,
+                'time_series': rainflow,
                 'state': State.FIXED,
                 'dstnode': 'Lake_Aniwhenua'
             },
             'Lake_Aniwhenua': {
                 'type': 'storage',
-                'level': 146.6,
+                'time_series': lake,
                 'LV': LV,
                 'costs': [
                     [146.5, 146.6, 146.8, 146.9],
@@ -1250,32 +1263,32 @@ def test_lake_minflow():
             },
             'Barrage': {
                 'type': 'valve',
+                'time_series': barrage,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'dstnode': 'Barrage_Tail',
-                'flow': barrage
+                'dstnode': 'Barrage_Tail'
             },
             'Barrage_Tail': {
                 'type': 'summing'
             },
             'Lower': {
                 'type': 'river',
+                'time_series': lower,
                 'delay': 1800,
                 'srcnode': 'Barrage_Tail',
                 'dstnode': 'station_Tail',
-                'limitcost': 1.0,
-                'history': lower
+                'limitcost': 1.0
             },
             'station_Tail': {
                 'type': 'summing'
             },
             'System_Outflow': {
                 'type': 'river',
+                'time_series': sysoutflow,
                 'delay': 600,
                 'srcnode': 'station_Tail',
                 'setpoint': 30,
-                'lowcost': 1000000,
-                'history': sysoutflow
+                'lowcost': 1000000
             },
             'BarrageChange': {
                 'type': 'change_cost',
@@ -1292,12 +1305,10 @@ def test_lake_minflow():
                     [0, 0]
                 ]
             }
-        },
-        'time_step': 600,
-        'duration': 14400
+        }
     }
-    m = HydraulicModel(modeldict)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = sorted(results['Lake_Aniwhenua']['Level'].keys())
     rainflow = get_samples(m, 'Rainflow', 'Flow', times)
@@ -1328,21 +1339,25 @@ def test_lake_bid_minflow():
     """Add rate of change limit."""
     # Results changed slightly for this one, the overall cost was almost
     # identical so call it ok.
-    upper = TimeSeries('Upper', [[1522494000, 65.0]])
-    sysinflow = TimeSeries('SysInflow', [[1522493400, 65.0]])
-    barrage = TimeSeries('Barrage', [[1522494000, 2.5]])
-    tail = TimeSeries('Tail', [[1522492200, 2.5]])
-    sysoutflow = TimeSeries('SysOuflow', [[1522494000, 7.0]])
-    power1 = TimeSeries('G1', [[1522492200, 6.2], [1522494000, 6.0]])
-    power2 = TimeSeries('G2', [[1522492200, 0.2], [1522494000, 0.0]])
-    modeldict = {
-        'tempdir': 'tmp',
+    upper = TimeSeries([[1522494000, 65.0]])
+    sysinflow = TimeSeries([[1522493400, 65.0]])
+    barrage = TimeSeries([[1522494000, 2.5]])
+    tail = TimeSeries([[1522492200, 2.5]])
+    sysoutflow = TimeSeries([[1522494000, 7.0]])
+    power1 = TimeSeries([[1522492200, 6.2], [1522494000, 6.0]])
+    power2 = TimeSeries([[1522492200, 0.2], [1522494000, 0.0]])
+    lake = TimeSeries(146.6)
+    model = {
         'name': 'test',
+        'actual_time': 1522494300,
+        'time_step': 1800,
+        'duration': 36000,
+        'tempdir': 'tmp',
         'model': {
             'System_Inflow': {
                 'type': 'valve',
+                'time_series': sysinflow,
                 'dstnode': 'Galatea_Site',
-                'flow': sysinflow,
                 'state': State.FIXED
             },
             'Galatea_Site': {
@@ -1350,6 +1365,7 @@ def test_lake_bid_minflow():
             },
             'Upper': {
                 'type': 'river',
+                'time_series': upper,
                 'delay': 1800,
                 'srcnode': 'Galatea_Site',
                 'dstnode': 'Lake_Aniwhenua',
@@ -1357,7 +1373,7 @@ def test_lake_bid_minflow():
             },
             'Lake_Aniwhenua': {
                 'type': 'storage',
-                'level': 146.6,
+                'time_series': lake,
                 # 'low': 146.6,
                 # 'high': 146.8,
                 # 'limitcost': 10000.0,
@@ -1369,9 +1385,9 @@ def test_lake_bid_minflow():
             },
             'G1': {
                 'type': 'generator',
+                'time_series': power1,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'MW': power1,
                 'ranges': [
                     [6.8, 12.8]
                 ],
@@ -1379,9 +1395,9 @@ def test_lake_bid_minflow():
             },
             'G2': {
                 'type': 'generator',
+                'time_series': power2,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'MW': power2,
                 'startlimit': [1, 1200, 1000.0],
                 'ranges': [
                     [0.0],
@@ -1391,10 +1407,10 @@ def test_lake_bid_minflow():
             },
             'Barrage': {
                 'type': 'valve',
+                'time_series': barrage,
                 'state': State.FREE,
                 'srcnode': 'Lake_Aniwhenua',
-                'dstnode': 'Barrage_Tail',
-                'flow': barrage
+                'dstnode': 'Barrage_Tail'
             },
             'Barrage_Flow_Cost': {
                 'type': 'cost',
@@ -1412,9 +1428,9 @@ def test_lake_bid_minflow():
             },
             'Lower': {
                 'type': 'river',
+                'time_series': tail,
                 'delay': 1800,
-                'srcnode': 'Barrage_Tail',
-                'history': tail
+                'srcnode': 'Barrage_Tail'
             },
             'System_Outflow_Consent': {
                 'type': 'consent',
@@ -1506,12 +1522,10 @@ def test_lake_bid_minflow():
                     'G2'
                 ],
             }
-        },
-        'time_step': 1800,
-        'duration': 36000
+        }
     }
-    m = HydraulicModel(modeldict, timeout=3600)
-    m.solve_lp(1522494300)
+    m = HydraulicModel(model, timeout=3600)
+    m.solve_lp()
     results = m.lp.resultsdict
     times = sorted(results['Lake_Aniwhenua']['Level'].keys())
     level = get_samples(m, 'Lake_Aniwhenua', 'Level', times)

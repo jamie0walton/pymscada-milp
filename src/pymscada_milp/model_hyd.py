@@ -21,13 +21,15 @@ class TimeSeries():
 
     time = 0
 
-    def __init__(self, tagname: str,
-                 time_series: list[list[int, int|float]] = None) -> None:
-        self.tagname = tagname
+    def __init__(self, time_series: float|list[list[int, int|float]] = None
+                 ) -> None:
         self._value = None
         self.series: dict[int, list[int|float]] = {}
         if time_series is not None:
-            self.set(time_series)
+            if type(time_series) == float:
+                self.set([[0, time_series]])
+            else:
+                self.set(time_series)
 
     @property
     def value(self) -> float:
@@ -53,6 +55,15 @@ class TimeSeries():
         """Set a list of [time_us, value] pairs."""
         self.series.update(time_series)
 
+    def times(self):
+        return sorted(self.series.keys())
+
+    def values(self):
+        values = []
+        for t in sorted(self.series.keys()):
+            values.append(self.series[t])
+        return values
+
 
 class HydraulicModel():
     """
@@ -76,6 +87,7 @@ class HydraulicModel():
         self.name = config['name']
         self.time_step = config['time_step']
         self.duration = config['duration']
+        self.actual_time = config['actual_time']
         self.model: dict[str, Constraint] = {}
         tmpdir = Path(config['tempdir'])
         if not tmpdir.exists():
@@ -87,7 +99,6 @@ class HydraulicModel():
         self.timeout = timeout
         self.lp = None
         self.costs = []
-        self.actual_time = None
         self.start_time = None
         self.end_time = None
         self.times = None
@@ -95,6 +106,9 @@ class HydraulicModel():
             self._add_element(e, config['model'][e])
         for e in self.model.values():
             e.link(self)
+
+    def set_actual_time(self, actual_time):
+        self.actual_time = actual_time
 
     def remove_result(self):
         """Clean the working directory of result files."""
@@ -183,7 +197,7 @@ class HydraulicModel():
             logging.critical(f"{name} type {e['type']} does not exist")
 
     #   @profile()
-    def solve_lp(self, actual_time=None):
+    def solve_lp(self):
         """
         Make and solve the MILP.
 
@@ -197,7 +211,6 @@ class HydraulicModel():
         # +   |set_time
         # +   ||       +            + end_time
         # +   ||       +            +
-        self.actual_time = actual_time if actual_time else int(time.time())
         self.start_time = self.actual_time - self.actual_time % self.time_step
         if self.duration > 1:
             if self.actual_time == self.start_time:
@@ -216,8 +229,6 @@ class HydraulicModel():
         time_set.add(self.set_time)
         time_set.add(self.end_time)
         self.times = sorted(time_set)
-        # Get tag values
-        self.process_sub()
         # Build the model
         self.lp = LpModel(
             f"{self.name} {self.actual_time}",
@@ -238,8 +249,6 @@ class HydraulicModel():
         for e in self.model:
             self.model[e]._post_process(self)
         self.lp.parse_mps()
-        # Write out tag values
-        self.process_pub()
         self.save_state()
 
     def add_cost(self, name):
@@ -256,32 +265,6 @@ class HydraulicModel():
         else:
             self.costs.append(name)
 
-    def process_sub(self):
-        """Get a subscribed tag value."""
-        for element in self.model:
-            for prop in self.model[element].sub:
-                if not hasattr(self.model[element], prop):  # no mapping
-                    continue
-                tagname = self.model[element].sub[prop]
-                if self.tags[tagname].value is not None:
-                    setattr(self.model[element], prop,
-                            self.tags[tagname].value)
-                else:
-                    logging.warning(f"None for {tagname} in process_sub")
-
-    def process_pub(self):
-        """Set a published tag value."""
-        for element in self.model:
-            for prop in self.model[element].pub:
-                if not hasattr(self.model[element], prop):  # no mapping
-                    continue
-                tagname = self.model[element].pub[prop]
-                setval = getattr(self.model[element], prop)
-                if setval is not None:
-                    self.tags[tagname].value = setval
-                else:
-                    logging.warning(f"None for {tagname} in process_pub")
-
 
 class Constraint():
     """
@@ -292,7 +275,7 @@ class Constraint():
     limits more likely to succeed.
     """
 
-    __slots__ = ['name', 'type', 'pub', 'sub', 'srcnode', 'dstnode',
+    __slots__ = ['name', 'type', 'time_series', 'srcnode', 'dstnode',
                  'inflows', 'outflows', 'elements', 'costs', 'min', 'max',
                  'setpoint', 'lowcost', 'highcost', 'ranges', 'runningcost',
                  'history']
@@ -301,8 +284,7 @@ class Constraint():
         """Constraint init."""
         self.name: str = None
         self.type: str = None
-        self.pub = {}
-        self.sub = {}
+        self.time_series: TimeSeries = None
         self.srcnode = None
         self.dstnode = None
         self.inflows = []
@@ -334,7 +316,12 @@ class Constraint():
         logging.error('Must have custom LP building routine')
 
     def _post_process(self, m: HydraulicModel):
-        return
+        if self.time_series is None:
+            return
+        for t in m.times:
+            if self._default_name(t) in m.lp.results:
+                value = m.lp.results[self._default_name(t)]
+                self.time_series.set([[t, value]])
 
     def _add_limit_costs(self, m: HydraulicModel, t: int):
         if self.costs is not None:
@@ -541,12 +528,13 @@ class Storage(Constraint):
     def __init__(self, **kwargs):
         """Inherits from Constraint."""
         self.name = None
-        self.level = 50.0
         self.inflows = []
         self.outflows = []
         self._vol = 0
         self.LV = None
         super().__init__(**kwargs)
+        if self.time_series is None:
+            raise f'{self.name} must have a level time_series.'
         self.LV_xs = [x[0] for x in self.LV]
         self.LV_ys = [x[1] for x in self.LV]
         if self.costs is not None:
@@ -568,7 +556,8 @@ class Storage(Constraint):
         return interp(level, self.LV_xs, self.LV_ys)
 
     def _create_lp(self, m: HydraulicModel):
-        self._vol = self._volume(self.level)
+        level = self.time_series.get(m.actual_time)
+        self._vol = self._volume(level)
         for ti, t in enumerate(m.times):
             if t < m.actual_time:
                 continue
@@ -602,6 +591,9 @@ class Storage(Constraint):
                 volume = m.lp.results[self._volume_name(t)]
                 level = self._level(volume)
                 m.lp.results[self._level_name(t)] = level
+                if self.time_series is None:
+                    continue
+                self.time_series.set([[t, level]])
 
 
 class StorageProfile(Constraint):
@@ -686,6 +678,8 @@ class River(Constraint):
         self.delay = 0
         self.limitcost = 1000000.0
         super().__init__(**kwargs)
+        if self.time_series is None:
+            raise f'{self.name} must have a flow time_series.'
 
     def _default_name(self, time):
         return super()._inflow_name(time)
@@ -703,10 +697,8 @@ class River(Constraint):
             if t_prev == m.actual_time:
                 t_prev = m.set_time
             if t_prev < m.set_time:
-                if self.history is None:
-                    raise(f'River {self.name} history is required.')
                 m.lp.add_row(self._outflow_name(t), 'E',
-                             self.history.get(t_prev))
+                             self.time_series.get(t_prev))
             else:
                 m.lp.add_row(self._outflow_name(t), -1,
                              self._inflow_name(t_prev), 'E', 0.0)
@@ -728,15 +720,15 @@ class Valve(Constraint):
         self.state: State = State.OFF
         self.flow: TimeSeries = None
         super().__init__(**kwargs)
+        if self.time_series is None:
+            raise f'{self.name} must have a flow time_series.'
 
     def _default_name(self, time):
         return super()._flow_name(time)
 
     def _create_lp(self, m: HydraulicModel):
         for t in m.times:
-            flow = 0
-            if self.flow is not None:
-                flow = self.flow.get(t)
+            flow = self.time_series.get(t)
             if flow < 0.1:
                 flow = 0
             if t <= m.actual_time:
@@ -760,13 +752,14 @@ class Generator(Constraint):
         self.name = None
         self.cost = 1.0
         self.state = State.FREE
-        self.MW: TimeSeries = None
         self.setMW = 0.0
         self.stop = False
         self.startlimit = []
         self.rangelimit = []
         self.PQ = []
         super().__init__(**kwargs)
+        if self.time_series is None:
+            raise f'{self.name} must have a power time_series.'
         # CPU cost of doing this per call in debug is HIGH
         self.PQ_xs = [x[0] for x in self.PQ]
         self.PQ_ys = [x[1] for x in self.PQ]
@@ -776,9 +769,7 @@ class Generator(Constraint):
 
     def _create_lp(self, m: HydraulicModel):
         for t in m.times:
-            power = 0.0
-            if self.MW is not None:
-                power = self.MW.get(t)
+            power = self.time_series.get(t)
             self._add_ranges(m, t)
             power = self._range_conform(power)
             if t < m.set_time:
@@ -795,7 +786,7 @@ class Generator(Constraint):
             pre_times = [m.start_time - i * m.time_step for i in
                          range(self.startlimit[1] // m.time_step - 1, 0, -1)]
             for t in pre_times:
-                power = self._range_conform(self.MW.get(t))
+                power = self._range_conform(self.time_series.get(t))
                 m.lp.add_row(self._power_name(t), 'E', power)
                 self._add_ranges(m, t)
             cos_lists = [[]]
