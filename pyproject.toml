@@ -1,6 +1,6 @@
 [project]
 name = "pymscada-milp"
-version = "0.0.2"
+version = "0.0.3"
 description = "MILP extension for pymscada"
 authors = [
     {name = "Jamie Walton", email = "jamie@walton.net.nz"},
