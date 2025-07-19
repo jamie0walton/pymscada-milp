@@ -3,5 +3,9 @@
         "tests"
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "workbench.colorCustomizations": {
+        "titleBar.activeBackground": "#117711",
+        "titleBar.inactiveBackground": "#117711"
+    }
 }
